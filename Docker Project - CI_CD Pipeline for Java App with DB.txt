@@ -1,0 +1,76 @@
+pipeline {
+    agent {
+        node {
+            label 'prod'
+        }
+    }
+    tools {
+        maven 'mymaven'
+    }
+    stages {
+        stage('SourceCode') {
+            steps {
+                git "https://github.com/MonuKumarGH/dockerwebapp.git"
+            }
+        }
+        stage('Build') {
+            steps {
+                sh 'mvn clean install'
+            }
+        }
+        stage ('CQA'){
+            steps {
+              withSonarQubeEnv('mysonar') {
+                sh ' mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar -Dsonar.projectKey=MyProject '  
+                 }
+            }
+        }
+        stage ('QualityGates') {
+            steps {
+                waitForQualityGate abortPipeline: true, credentialsId: 'SonarQube'
+            }
+        }
+        stage ('ArtiFacts') {
+            steps {
+                nexusArtifactUploader artifacts: [[artifactId: 'vprofile', classifier: '', file: 'target/vprofile-v2.war', type: 'war']], credentialsId: 'Nexus', groupId: 'com.visualpathit', nexusUrl: '3.22.112.162:8081', nexusVersion: 'nexus3', protocol: 'http', repository: 'ArtiFact', version: 'v2'
+            }
+        }
+        stage ('Images') {
+            steps {
+                sh 'cp -r target Docker-app'
+                sh 'docker build -t appimage Docker-app'
+                sh 'docker build -t dbimage Docker-db'
+            }
+        }
+        stage ("ScanImages") {
+            steps {
+                sh 'trivy image appimage >> app-image-report.txt'
+                sh 'trivy image dbimage >> db-image-report.txt'
+            }
+        }
+        stage ('Registry') {
+            steps {
+                script {
+                    withDockerRegistry(credentialsId: 'dockerhub') {
+                        sh 'docker tag appimage monukumardh/oct:javaapp'
+                        sh 'docker tag dbimage monukumardh/oct:db'
+                        sh 'docker push monukumardh/oct:javaapp'
+                        sh 'docker push monukumardh/oct:db'
+                    }
+                }
+            }
+        }
+        stage ('DeployInStack') {
+            steps {
+                sh 'docker stack deploy myapp --compose-file=compose.yml'
+            }
+        }
+    }
+    post {
+        always {
+            mail to: 'mandalmonukumar465@gmail.com',
+            subject: "Build Status: ${currentBuild.fullDisplayName}",
+            body: "The build ${env.BUILD_NUMBER} finished with status: ${currentBuild.currentResult}. View logs at: ${env.BUILD_URL}"
+        }
+    }
+}
